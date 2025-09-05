@@ -1,0 +1,130 @@
+id|lateral|longitudinal|vertical
+1|||
+3|Nearside||
+5|Offside||
+7||Front|
+9||Rear|
+11|Centre|Front|Upper
+13|Nearside|Rear|
+15|Centre||
+17|Offside|Rear|
+19|Offside|Rear|Outer
+21|Nearside||Outer
+23|Offside||Outer
+25|Nearside|Front|
+27|Offside|Front|
+29|||Upper
+31|Nearside|Front|Lower
+33|Offside|Front|Lower
+35|Nearside Outer||
+37|Nearside|Front|Inner
+39|Nearside|Front|Upper
+41|Nearside Inner|Front|Upper
+43|Offside Inner|Front|Upper
+45|Offside|Rear|Lower
+47|Centre|Front|
+49|Offside|Front|Upper
+51|Nearside||Lower
+53|Nearside Outer|Rear|
+55|Offside Outer|Rear|
+57|Offside|Front|Outer
+59|Offside Inner|Rear|
+61|Inner|Rear|
+63||Front|Inner
+65|Offside Outer||
+67|Centre|Rear|
+69|Nearside|Front|Outer
+71||Front|Lower
+73|Centre|Rear|Lower
+75|Nearside||Inner
+77||Front|Upper
+79|Nearside Inner|Front|
+81||Rear|Inner
+83|Offside||Lower
+85|Nearside Inner||
+87|Nearside|Rear|Inner
+89|Offside Inner|Front|
+91|Nearside Outer|Rear|Lower
+93|Nearside Outer|Front|
+95|Offside Outer|Front|
+97|Offside Inner||
+99|Nearside|Rear|Lower
+101|Nearside Inner|Front|Lower
+103|Offside Inner|Front|Lower
+105|Nearside|Rear|Upper
+107|Offside|Rear|Upper
+109|Centre|Front|Outer
+111|Nearside||Upper
+113|Centre||Upper
+115|Offside||Inner
+117|Outer||
+119|Nearside Inner|Rear|
+121|Offside|Front|Inner
+123|||Lower
+125||Front|Outer
+127|Centre|Front|Lower
+129|Nearside Outer|Front|Lower
+131|Offside|Rear|Inner
+133|Nearside|Rear|Outer
+135|Offside||Upper
+137|Nearside Inner||Lower
+139|Centre||Inner
+141|Centre|Front|Inner
+143||Rear|Lower
+145|Centre|Rear|Inner
+147|Outer|Rear|
+149|Offside Outer|Front|Lower
+151|Centre||Lower
+153|Inner||
+155|Centre||Outer
+157||Rear|Upper
+159|||Outer
+161|||Inner
+163|Centre|Rear|Upper
+165|Outer|Front|
+167|Inner|Front|
+169|Offside Inner||Lower
+171|Offside Outer||Lower
+173|Nearside Inner|Rear|Upper
+175|Centre|Rear|Outer
+177|Offside Outer|Rear|Lower
+179|Offside Inner|Rear|Upper
+181||Rear|Outer
+183|Offside Outer|Front|Upper
+185|Nearside Inner|Rear|Lower
+187|Inner|Front|Upper
+189|Nearside Outer||Lower
+191|Offside Inner||Upper
+193|Inner|Rear|Lower
+195|Offside Outer|Rear|Upper
+197|Nearside Outer|Front|Upper
+199|Nearside Outer|Rear|Upper
+201|Offside Inner|Rear|Lower
+203|Outer|Rear|Upper
+205|Outer||Lower
+207|Offside Outer||Upper
+209|Nearside Outer||Upper
+211|Inner|Front|Lower
+213|Outer|Rear|Lower
+215|Inner||Upper
+217|Inner||Lower
+219|Outer|Front|Lower
+221|Inner|Rear|Upper
+223|Outer|Front|Upper
+225|Nearside Inner||Upper
+227|Outer||Upper
+229|Central|Front|
+231|Central|Front|Lower
+233|Central|Rear|Upper
+235|Central|Rear|Inner
+237|Central||
+239|Central|Rear|
+241|Central||Upper
+243|Central|Front|Upper
+245|Central||Inner
+247|Central||Lower
+249|Central|Front|Outer
+251|Central|Rear|Lower
+253|Central|Rear|Outer
+255|Central||Outer
+257|Central|Front|Inner
