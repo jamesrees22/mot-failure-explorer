@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import datetime as dt
-from datetime import datetime
+from datetime import datetime, timezone
 from glob import glob
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +52,35 @@ def upsert_df(table: str, df: pd.DataFrame, chunk: int = 5000) -> None:
         batch = safe_records[i : i + chunk]
         sb.table(table).upsert(batch).execute()
 
+# ---------- Robust CSV readers (auto-detect delimiter) ----------
+def _read_any_csv(path: str) -> pd.DataFrame:
+    """
+    Read small lookup files with automatic delimiter detection (|, , or tab).
+    Falls back to Python engine sniffing.
+    """
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        head = f.read(4096)
+    if "|" in head and head.count("|") >= head.count(","):
+        return pd.read_csv(path, sep="|", low_memory=False)
+    if "\t" in head and head.count("\t") > 0:
+        return pd.read_csv(path, sep="\t", low_memory=False)
+    # Let pandas sniff comma/other
+    return pd.read_csv(path, sep=None, engine="python", low_memory=False)
+
+def _read_delim_file(path: str) -> pd.DataFrame:
+    """
+    Read large DVSA tables (TESTRESULT/TESTITEM) with a quick delimiter sniff.
+    """
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        head = f.read(4096)
+    if "|" in head and head.count("|") >= head.count(","):
+        sep = "|"
+    elif "\t" in head and head.count("\t") > 0:
+        sep = "\t"
+    else:
+        sep = ","
+    return pd.read_csv(path, sep=sep, low_memory=False)
+
 # ----------------- Seed failure codes (static CSV you already have) -----------------
 def seed_failure_codes_from_item_detail(detail_path: str) -> pd.DataFrame:
     """
@@ -61,13 +90,11 @@ def seed_failure_codes_from_item_detail(detail_path: str) -> pd.DataFrame:
         print(f"[warn] item_detail not found: {detail_path}")
         return pd.DataFrame()
 
-    det = pd.read_csv(detail_path)
+    det = _read_any_csv(detail_path)
     # expected columns (names vary slightly by release)
     # RFRID, TESTCLASSID, RFRDESC, RFRINSPMANDESC, RFRADVISORYTEXT, MINORITEM, rfr_deficiency_category ...
     # Normalize columns we will store
-    keep = {}
-    for col in det.columns:
-        keep[col.lower()] = col
+    keep = {col.lower(): col for col in det.columns}
 
     out = pd.DataFrame()
     out["code"] = det[keep.get("rfrid", "RFRID")].astype(str)
@@ -91,14 +118,14 @@ def load_lookups(dir_path: str) -> Dict[str, pd.DataFrame]:
     def _read(name: str) -> Optional[pd.DataFrame]:
         path = os.path.join(dir_path, name)
         if os.path.exists(path):
-            return pd.read_csv(path)
+            return _read_any_csv(path)
         return None
 
-    lk["fuel"] = _read("mdr_fuel_types.csv")      # code -> label
-    lk["outcome"] = _read("mdr_test_outcome.csv") # code -> label
-    lk["type"] = _read("mdr_test_type.csv")       # code -> label
-    lk["detail"] = _read("item_detail.csv")       # RFR descriptions
-    lk["group"] = _read("item_group.csv")         # optional group names
+    lk["fuel"]   = _read("mdr_fuel_types.csv")      # code -> label
+    lk["outcome"]= _read("mdr_test_outcome.csv")    # code -> label
+    lk["type"]   = _read("mdr_test_type.csv")       # code -> label
+    lk["detail"] = _read("item_detail.csv")         # RFR descriptions
+    lk["group"]  = _read("item_group.csv")          # optional group names
     return lk
 
 def _coerce_date(series: pd.Series, dayfirst=True) -> pd.Series:
@@ -116,7 +143,8 @@ def _derive_first_use_year(series: pd.Series) -> pd.Series:
 def _map_outcome_code_to_pass_fail(code: pd.Series) -> pd.Series:
     """
     DVSA codes:
-    P = Pass, F = Fail, PRS = repaired within 1hr (initial fail) etc. We’ll treat PRS as FAIL for initial-failure analysis. :contentReference[oaicite:1]{index=1}
+    P = Pass, F = Fail, PRS = repaired within 1hr (initial fail) etc.
+    We treat PRS as FAIL for initial-failure analysis.
     """
     s = code.astype(str).str.upper().str.strip()
     s = s.replace({"PASSED": "P", "FAILED": "F"})
@@ -131,7 +159,7 @@ def load_local_dvsa(data_dir: str) -> None:
     if lk.get("detail") is not None:
         seed_failure_codes_from_item_detail(os.path.join(data_dir, "item_detail.csv"))
 
-    # 2) Find annual files (pipe-delimited)
+    # 2) Find annual files (delimiter auto-detected)
     result_paths = sorted(glob(os.path.join(data_dir, "TESTRESULT*.csv")))
     item_paths   = sorted(glob(os.path.join(data_dir, "TESTITEM*.csv")))
     if not result_paths or not item_paths:
@@ -139,22 +167,22 @@ def load_local_dvsa(data_dir: str) -> None:
         return
 
     # 3) Concatenate per table (limit rows if SAMPLE_ROWS set)
-    def _read_pipe(paths: List[str]) -> pd.DataFrame:
+    def _read_many(paths: List[str]) -> pd.DataFrame:
         frames = []
         for p in paths:
             print(f"Reading {os.path.basename(p)} …")
-            df = pd.read_csv(p, sep="|", low_memory=False)
+            df = _read_delim_file(p)
             if SAMPLE_ROWS > 0:
                 df = df.head(SAMPLE_ROWS)
             frames.append(df)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    tr = _read_pipe(result_paths)  # Test Result
-    ti = _read_pipe(item_paths)    # Test Item
+    tr = _read_many(result_paths)  # Test Result
+    ti = _read_many(item_paths)    # Test Item
 
     print(f"TESTRESULT rows: {len(tr):,}, TESTITEM rows: {len(ti):,}")
 
-    # 4) Keep only Normal tests (NT) as per DVSA guidance for initial/final rates. :contentReference[oaicite:2]{index=2}
+    # 4) Keep only Normal tests (NT)
     # Column names vary slightly; harmonize keys we need:
     cols = {c.lower().replace(" ", ""): c for c in tr.columns}
 
@@ -181,8 +209,7 @@ def load_local_dvsa(data_dir: str) -> None:
     c_vehicle_id  = c("VEHICLEID")
     c_class_id    = c("TESTCLASSID")
 
-    if c_test_type and "type" in lk and "TYPECODE" in [x.upper() for x in lk["type"].columns]:
-        # filter to NT using lookup if you want; simpler – keep rows where TESTTYPE == "NT"
+    if c_test_type and "type" in lk and any(col.upper() == "TYPECODE" for col in lk["type"].columns):
         tr = tr[tr[c_test_type].astype(str).str.upper().eq("NT")]
 
     # 5) Map fields to our mot_tests schema
@@ -206,7 +233,6 @@ def load_local_dvsa(data_dir: str) -> None:
         tests = tests[(tests["first_use_year"].astype("Float64") >= cutoff) | tests["first_use_year"].isna()]
 
     # 6) Aggregate failures per TESTID from TESTITEM
-    # Columns: TESTID, RFRID, RFRTYPE, LOCATIONID, DMARK, etc. (pipe-delimited)
     ti_cols = {c.lower(): c for c in ti.columns}
     t_testid = ti_cols.get("testid")
     t_rfrid  = ti_cols.get("rfrid")
@@ -227,10 +253,14 @@ def load_local_dvsa(data_dir: str) -> None:
     if "test_id" in tests.columns and not failures_list.empty:
         tests["failure_reasons"] = tests["test_id"].map(failures_list)
         tests["failure_reasons"] = tests["failure_reasons"].apply(lambda x: x if isinstance(x, list) else [])
+    else:
+        tests["failure_reasons"] = [[] for _ in range(len(tests))]
 
     # 8) Final clean
     required = ["test_date", "make", "model", "result"]
-    tests = tests.dropna(subset=required, how="any").drop_duplicates(subset=["test_id", "test_date", "make", "model", "odometer", "result"])
+    tests = tests.dropna(subset=required, how="any").drop_duplicates(
+        subset=["test_id", "test_date", "make", "model", "odometer", "result"]
+    )
 
     # 9) Upsert to Supabase
     if DRY_RUN:
@@ -248,7 +278,9 @@ def seed_sample_rows() -> None:
         return
     df = pd.read_csv(path, parse_dates=["test_date"])
     if "failure_reasons" in df.columns:
-        df["failure_reasons"] = df["failure_reasons"].fillna("").apply(lambda s: [x for x in str(s).split("|") if x])
+        df["failure_reasons"] = df["failure_reasons"].fillna("").apply(
+            lambda s: [x for x in str(s).split("|") if x]
+        )
     if "first_use_year" in df.columns:
         df["first_use_year"] = pd.to_numeric(df["first_use_year"], errors="coerce").astype("Int64")
     if "odometer" in df.columns:
@@ -264,11 +296,11 @@ def seed_sample_rows() -> None:
 
 # ----------------- Entrypoint -----------------
 if __name__ == "__main__":
-    print(f"[{datetime.utcnow().isoformat()}] MOT refresh starting…")
+    print(f"[{datetime.now(timezone.utc).isoformat()}] MOT refresh starting…")
     # 1) Load failure code dictionary from item_detail → mot_failure_codes
     seed_failure_codes_from_item_detail(os.path.join(DATA_DIR, "item_detail.csv"))
     # 2) Optional seed demo rows
     seed_sample_rows()
-    # 3) Load DVSA annual files from etl/data (pipe-delimited)
+    # 3) Load DVSA annual files from DATA_DIR (delimiter auto-detected)
     load_local_dvsa(DATA_DIR)
     print("Done.")
