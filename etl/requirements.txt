@@ -1,0 +1,5 @@
+pandas
+pyarrow
+supabase
+python-dotenv
+requests
