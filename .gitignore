@@ -9,4 +9,4 @@ __pycache__/
 .venv/
 # Misc
 .DS_Store
-etl/data/
+apps/web/etl/data/
