@@ -21,8 +21,11 @@ MAX_YEARS_BACK = int(os.environ.get("MOT_MAX_YEARS_BACK", "8"))
 
 # ----------------- Helpers -----------------
 def _norm(s: str) -> str:
-    """lowercase and strip all non-alphanumerics for flexible matching"""
-    return "".join(ch for ch in s.lower() if ch.isalnum())
+    """lowercase + keep only alphanumerics"""
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+def _contains_all(hay: str, *needles: str) -> bool:
+    return all(n in hay for n in needles)
 
 def _to_serializable(v: Any) -> Any:
     if isinstance(v, (pd.Timestamp, dt.datetime, dt.date)):
@@ -53,7 +56,7 @@ def upsert_df(table: str, df: pd.DataFrame, chunk: int = 5000) -> None:
         batch = safe_records[i : i + chunk]
         sb.table(table).upsert(batch).execute()
 
-# ---------- Robust CSV readers (auto-detect delimiter) ----------
+# ---------- CSV readers (auto-detect delimiter) ----------
 def _read_any_csv(path: str) -> pd.DataFrame:
     """Read small lookup files with auto delimiter (|, , or tab)."""
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -76,20 +79,29 @@ def _read_delim_file(path: str) -> pd.DataFrame:
         sep = ","
     return pd.read_csv(path, sep=sep, low_memory=False)
 
-def _resolve_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
-    """Return the original column name matching any candidate by normalised form."""
+def _resolve_col(df: pd.DataFrame, *candidates: str, keywords: Optional[List[str]]=None) -> Optional[str]:
+    """
+    Return original column name:
+    1) exact by normalised candidate,
+    2) else keyword search (all keywords contained in normalised name).
+    """
     cmap = {_norm(c): c for c in df.columns}
     for cand in candidates:
         col = cmap.get(_norm(cand))
         if col:
             return col
+    if keywords:
+        for col in df.columns:
+            h = _norm(col)
+            if _contains_all(h, *[ _norm(k) for k in keywords ]):
+                return col
     return None
 
 # ----------------- Seed failure codes -----------------
 def seed_failure_codes_from_item_detail(detail_path: str) -> pd.DataFrame:
     """
-    item_detail.csv provides RFR (defect) dictionary.
-    Handles header variants like RFRID / rfr_id / defect_id etc.
+    item_detail.csv provides the defect dictionary.
+    We upsert only 'code' and 'description' to match your current table schema.
     """
     if not os.path.exists(detail_path):
         print(f"[warn] item_detail not found: {detail_path}")
@@ -100,11 +112,9 @@ def seed_failure_codes_from_item_detail(detail_path: str) -> pd.DataFrame:
         print(f"[warn] item_detail empty: {detail_path}")
         return pd.DataFrame()
 
-    # Resolve columns flexibly
-    c_rfrid = _resolve_col(det, "RFRID", "rfr_id", "defectid", "rfrcode", "defect_id")
-    c_desc  = _resolve_col(det, "RFRDESC", "rfr_description", "description", "rfrtext", "defect_description")
-    c_cat   = _resolve_col(det, "rfr_deficiency_category", "deficiency_category", "category", "defcat")
-    c_class = _resolve_col(det, "TESTCLASSID", "test_class_id", "classid")
+    c_rfrid = _resolve_col(det, "RFRID", "rfr_id", "defectid", "rfrcode", "defect_id", keywords=["rfr","id"])
+    c_desc  = _resolve_col(det, "RFRDESC", "rfr_description", "description", "rfrtext",
+                           keywords=["desc","description","text"])
 
     if not c_rfrid:
         print("[warn] item_detail has no RFRID/rfr_id column. Available:", list(det.columns))
@@ -113,13 +123,14 @@ def seed_failure_codes_from_item_detail(detail_path: str) -> pd.DataFrame:
     out = pd.DataFrame()
     out["code"] = det[c_rfrid].astype(str)
     out["description"] = det[c_desc] if c_desc else None
-    out["category"] = det[c_cat] if c_cat else None
-    out["test_class_id"] = det[c_class] if c_class else None
-
     out = out.dropna(subset=["code"]).drop_duplicates(subset=["code"])
 
+    # 🔒 Only send columns that exist in your table schema
+    # Your table currently has 'code' and 'description'
+    out = out[["code", "description"]]
+
     if DRY_RUN:
-        print("[DRY_RUN] failure codes head:")
+        print("[DRY_RUN] failure codes (trimmed to code/description) head:")
         print(out.head(5))
     else:
         upsert_df("mot_failure_codes", out)
@@ -135,15 +146,18 @@ def load_lookups(dir_path: str) -> Dict[str, pd.DataFrame]:
             return _read_any_csv(path)
         return None
 
-    lk["fuel"]   = _read("mdr_fuel_types.csv")
-    lk["outcome"]= _read("mdr_test_outcome.csv")
-    lk["type"]   = _read("mdr_test_type.csv")
-    lk["detail"] = _read("item_detail.csv")
-    lk["group"]  = _read("item_group.csv")
+    lk["fuel"]    = _read("mdr_fuel_types.csv")       # (optional)
+    lk["outcome"] = _read("mdr_test_outcome.csv")     # id->label
+    lk["type"]    = _read("mdr_test_type.csv")        # type codes
+    lk["detail"]  = _read("item_detail.csv")
+    lk["group"]   = _read("item_group.csv")
     return lk
 
 def _coerce_date(series: pd.Series, dayfirst=True) -> pd.Series:
-    return pd.to_datetime(series, errors="coerce", dayfirst=dayfirst)
+    s = series.astype(str)
+    if s.str.match(r"\d{4}-\d{2}-\d{2}").mean() > 0.8:
+        return pd.to_datetime(s, format="%Y-%m-%d", errors="coerce")
+    return pd.to_datetime(s, errors="coerce", dayfirst=dayfirst)
 
 def _derive_first_use_year(series: pd.Series) -> pd.Series:
     d = _coerce_date(series, dayfirst=True)
@@ -157,7 +171,7 @@ def _map_outcome_code_to_pass_fail(code: pd.Series) -> pd.Series:
     s = s.replace({"PASSED": "P", "FAILED": "F"})
     return s.map({"P": "PASS", "F": "FAIL", "PRS": "FAIL"}).where(lambda x: x.isin(["PASS", "FAIL"]), None)
 
-# ----------------- Main loader for local DVSA CSVs -----------------
+# ----------------- Main loader -----------------
 def load_local_dvsa(data_dir: str) -> None:
     lk = load_lookups(data_dir)
     if lk.get("detail") is not None:
@@ -184,30 +198,45 @@ def load_local_dvsa(data_dir: str) -> None:
 
     print(f"TESTRESULT rows: {len(tr):,}, TESTITEM rows: {len(ti):,}")
 
-    # Flexible column resolution for TESTRESULT
-    def c(*names: str) -> Optional[str]:
-        cmap = {_norm(col): col for col in tr.columns}
-        for n in names:
-            col = cmap.get(_norm(n))
-            if col:
-                return col
-        return None
+    # --- Resolve TESTRESULT columns (many variants observed) ---
+    def C(*names, kw=None):  # kw = keyword list
+        return _resolve_col(tr, *names, keywords=kw)
 
-    c_test_type   = c("TESTTYPE")
-    c_test_result = c("TESTRESULT")
-    c_test_date   = c("TESTDATE", "Test Date", "DateofTest")
-    c_make        = c("MAKE")
-    c_model       = c("MODEL")
-    c_mileage     = c("TESTMILEAGE", "odometer", "mileage")
-    c_postcode    = c("POSTCODEREGION", "Postcode Area", "station_postcode")
-    c_fuel        = c("FUELTYPE")
-    c_first_use   = c("FIRSTUSEDATE", "Vehicle Date of First Use", "FirstUseDate")
-    c_test_id     = c("TESTID", "test_id")
-    c_vehicle_id  = c("VEHICLEID", "vehicle_id")
-    c_class_id    = c("TESTCLASSID", "test_class_id")
+    c_test_type   = C("TESTTYPE", "test_type", kw=["type"])
+    c_test_result = C("TESTRESULT", "test_result", "outcome", "result", "test_result_id", kw=["result"])
+    c_test_date   = C("TESTDATE", "DateofTest", "Test Date", "completed_date", "completion_date", kw=["date"])
+    c_make        = C("MAKE", "vehicle_make", kw=["make"])
+    c_model       = C("MODEL", "vehicle_model", kw=["model"])
+    c_mileage     = C("TESTMILEAGE", "odometer", "odometer_reading", "odometer_reading_value", kw=["odometer"])
+    c_postcode    = C("POSTCODEREGION", "Postcode Area", "station_postcode", "site_postcode_area", kw=["postcode"])
+    c_fuel        = C("FUELTYPE", "fuel_type", "fuel", kw=["fuel"])
+    c_first_use   = C("FIRSTUSEDATE", "Vehicle Date of First Use", "FirstUseDate", "first_used_date", kw=["first","use","date"])
+    c_test_id     = C("TESTID", "test_id", kw=["test","id"])
+    c_vehicle_id  = C("VEHICLEID", "vehicle_id", "vin", kw=["vehicle","id"])
+    c_class_id    = C("TESTCLASSID", "test_class_id", "classid", kw=["class","id"])
 
+    if DRY_RUN:
+        print("[MAP] test_type    ->", c_test_type)
+        print("[MAP] test_result  ->", c_test_result)
+        print("[MAP] test_date    ->", c_test_date)
+        print("[MAP] make         ->", c_make)
+        print("[MAP] model        ->", c_model)
+        print("[MAP] mileage      ->", c_mileage)
+        print("[MAP] postcode     ->", c_postcode)
+        print("[MAP] fuel_type    ->", c_fuel)
+        print("[MAP] first_use    ->", c_first_use)
+        print("[MAP] test_id      ->", c_test_id)
+        print("[MAP] vehicle_id   ->", c_vehicle_id)
+        print("[MAP] class_id     ->", c_class_id)
+
+    # Only filter to NT if the column exists and actually contains 'NT'
     if c_test_type:
-        tr = tr[tr[c_test_type].astype(str).str.upper().eq("NT")]
+        vals = tr[c_test_type].astype(str).str.upper().unique()
+        if "NT" in vals:
+            tr = tr[tr[c_test_type].astype(str).str.upper().eq("NT")]
+        else:
+            if DRY_RUN:
+                print(f"[INFO] test_type present but no NT in values {vals}; skipping NT filter")
 
     tests = pd.DataFrame()
     tests["test_id"] = tr[c_test_id] if c_test_id else pd.NA
@@ -219,14 +248,29 @@ def load_local_dvsa(data_dir: str) -> None:
     tests["station_postcode"] = tr[c_postcode] if c_postcode else pd.NA
     tests["fuel_type"] = tr[c_fuel] if c_fuel else pd.NA
     tests["first_use_year"] = _derive_first_use_year(tr[c_first_use]) if c_first_use else pd.NA
-    tests["result"] = _map_outcome_code_to_pass_fail(tr[c_test_result]) if c_test_result else pd.NA
     tests["test_class_id"] = tr[c_class_id] if c_class_id else pd.NA
 
+    # Map results to PASS/FAIL:
+    if c_test_result:
+        ser = tr[c_test_result]
+        if pd.api.types.is_numeric_dtype(ser) and lk.get("outcome") is not None:
+            lo = lk["outcome"]
+            id_col = _resolve_col(lo, "TESTRESULT", "id", "code", "test_result_id", kw=["id"]) or lo.columns[0]
+            name_col = _resolve_col(lo, "TESTRESULTDESC", "description", "label", kw=["desc","name"]) or lo.columns[-1]
+            o_map = dict(zip(lo[id_col].astype(str), lo[name_col].astype(str)))
+            mapped = ser.astype(str).map(o_map)
+            tests["result"] = _map_outcome_code_to_pass_fail(mapped)
+        else:
+            tests["result"] = _map_outcome_code_to_pass_fail(ser)
+    else:
+        tests["result"] = pd.NA
+
+    # Keep recent vehicles if configured
     if MAX_YEARS_BACK > 0 and "first_use_year" in tests:
         cutoff = dt.date.today().year - MAX_YEARS_BACK
         tests = tests[(tests["first_use_year"].astype("Float64") >= cutoff) | tests["first_use_year"].isna()]
 
-    # Flexible column resolution for TESTITEM
+    # ---- TESTITEM join for failures ----
     ti_map = {_norm(cn): cn for cn in ti.columns}
     t_testid  = ti_map.get(_norm("TESTID")) or ti_map.get(_norm("test_id"))
     t_rfrid   = ti_map.get(_norm("RFRID")) or ti_map.get(_norm("rfr_id")) or ti_map.get(_norm("defectid"))
@@ -253,7 +297,7 @@ def load_local_dvsa(data_dir: str) -> None:
     )
 
     if DRY_RUN:
-        print("[DRY_RUN] tests.head():")
+        print("[DRY_RUN] tests.shape:", tests.shape)
         print(tests.head(10))
         print(f"[DRY_RUN] Would upsert {len(tests)} tests")
     else:
