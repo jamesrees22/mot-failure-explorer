@@ -1,0 +1,11 @@
+test_date,make,model,fuel_type,first_use_year,odometer,result,station_postcode,failure_reasons
+2024-06-11,Ford,Fiesta,Petrol,2015,64000,FAIL,BS1 1AA,1.1.14|5.2.2
+2024-06-12,Vauxhall,Corsa,Petrol,2014,72000,PASS,BS1 1AA,
+2024-06-13,BMW,3 Series,Diesel,2012,98000,FAIL,M1 2AB,1.1.13|3.1.1
+2024-06-14,Volkswagen,Golf,Diesel,2016,54000,PASS,M1 2AB,
+2024-06-15,Toyota,Yaris,Petrol,2017,43000,FAIL,SW1A 1AA,5.3.1|5.2.2
+2024-06-16,Audi,A3,Petrol,2013,88000,PASS,SW1A 1AA,
+2024-06-17,Nissan,Qashqai,Diesel,2015,75000,FAIL,LS1 4AP,1.6.2|3.1.1
+2024-06-18,Mercedes-Benz,C-Class,Diesel,2018,39000,PASS,LS1 4AP,
+2024-06-19,Renault,Clio,Petrol,2011,101000,FAIL,BT1 5GS,1.1.14|5.3.1
+2024-06-20,Hyundai,i20,Petrol,2019,31000,PASS,BT1 5GS,

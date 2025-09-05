@@ -1,0 +1,11 @@
+# Node / Next
+node_modules/
+.next/
+out/
+.env*
+# Python
+__pycache__/
+*.pyc
+.venv/
+# Misc
+.DS_Store
