@@ -90,12 +90,24 @@ def _has_header(path: Path) -> bool:
 def _open_csv(path: Path) -> Iterator[Dict[str, str]]:
     """
     Open a DVSA pipe-delimited CSV with headers.
-    Handles UTF-8 BOM.
+    Tries UTF-8 (with BOM) first, then CP1252, then Latin-1 as fallback.
     """
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f, delimiter="|")
-        for row in reader:
-            yield {k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
+    encodings = ["utf-8-sig", "cp1252", "latin-1"]
+    last_err = None
+    for enc in encodings:
+        try:
+            with path.open("r", encoding=enc, newline="") as f:
+                reader = csv.DictReader(f, delimiter="|")
+                for row in reader:
+                    yield { (k or "").strip(): (v.strip() if isinstance(v, str) else v)
+                            for k, v in row.items() }
+            return
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    # If we tried all encodings and still failed, raise the last error
+    raise last_err or UnicodeDecodeError("utf-8", b"", 0, 1, "Unknown decode error")
+
 
 def _normalise_result_headers(row: Dict[str, str]) -> Dict[str, str]:
     """
