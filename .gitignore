@@ -9,4 +9,7 @@ __pycache__/
 .venv/
 # Misc
 .DS_Store
-apps/web/etl/data/
+# Ignore only large monthly datasets (keep lookups tracked)
+apps/web/etl/data/test_result_*.csv
+apps/web/etl/data/test_item_*.csv
+apps/web/etl/data/*.zip
