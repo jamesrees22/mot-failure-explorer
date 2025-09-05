@@ -1,0 +1,4 @@
+# Prevent huge MOT CSV datasets from ever being diffed or bloating history
+apps/web/etl/data/test_result_*.csv -diff -merge
+apps/web/etl/data/test_item_*.csv   -diff -merge
+apps/web/etl/data/*.zip             -diff -merge
