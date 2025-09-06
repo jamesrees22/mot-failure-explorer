@@ -168,13 +168,23 @@ ITEM_ALIASES = {
 }
 
 
+def _clean_key(k: str) -> str:
+    if not k:
+        return ""
+    # remove BOM/nbsp and normalize separators
+    k = (k.replace("\ufeff", "").replace("\xa0", " ")).strip().lower()
+    # collapse spaces/underscores and drop stray punctuation
+    k = k.replace(" ", "_")
+    while "__" in k:
+        k = k.replace("__", "_")
+    return k
+
 def _alias(row: Dict[str, str], mapping: Dict[str, str]) -> Dict[str, str]:
     out = {}
     for k, v in row.items():
-        kk = mapping.get((k or "").lower(), (k or "").lower())
-        out[kk] = v
+        ck = _clean_key(k)
+        out[mapping.get(ck, ck)] = v
     return out
-
 
 # ---------- Seed failure code lookup ----------
 
