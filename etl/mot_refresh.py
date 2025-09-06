@@ -16,6 +16,7 @@ Env:
   YEARS="2024" (comma-separated ok)
   DATA_DIR (optional; default apps/web/etl/data)
   BATCH_SIZE (optional; default 10000)
+  LOAD = "both" | "results" | "items"
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from datetime import datetime
 
 from supabase import create_client
 
-# ---------- CSV field size bump (avoid "_csv.Error: field larger than field limit") ----------
+# ---------- CSV field size bump ----------
 _max = sys.maxsize
 while True:
     try:
@@ -41,21 +42,18 @@ while True:
 DEFAULT_DATA_DIR = Path("apps/web/etl/data")
 DATA_DIR = Path(os.getenv("DATA_DIR") or DEFAULT_DATA_DIR)
 BATCH_SIZE = int(os.getenv("BATCH_SIZE") or "10000")
+LOAD_MODE = (os.getenv("LOAD") or "both").strip().lower()  # results | items | both
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 print(f"[INFO] DATA_DIR = {DATA_DIR.resolve()}")
+print(f"[INFO] LOAD_MODE = {LOAD_MODE}")
 
 # ---------- Helpers ----------
 
 def _open_csv(path: Path) -> Iterator[Dict[str, str]]:
-    """
-    Open a DVSA CSV with headers.
-    - Auto-detect delimiter (pipe vs comma) from the first line
-    - Tolerant decoding: utf-8-sig → cp1252 → latin-1
-    """
     encodings = ["utf-8-sig", "cp1252", "latin-1"]
     last_err = None
 
@@ -79,7 +77,6 @@ def _open_csv(path: Path) -> Iterator[Dict[str, str]]:
             with path.open("r", encoding=enc, newline="") as f:
                 reader = csv.DictReader(f, delimiter=chosen_delim)
                 for row in reader:
-                    # normalize keys/values
                     yield {(k or "").strip(): (v.strip() if isinstance(v, str) else v)
                            for k, v in row.items()}
             return
@@ -93,13 +90,11 @@ def _parse_date(s: str | None) -> str | None:
     if not s:
         return None
     s = s.strip()
-    # accept YYYY-MM-DD or DD/MM/YYYY or YYYY/MM/DD
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
         try:
             return datetime.strptime(s, fmt).date().isoformat()
         except ValueError:
             pass
-    # already ISO? (defensive)
     if len(s) == 10 and s[4] in "-/" and s[7] in "-/":
         try:
             return datetime.fromisoformat(s.replace("/", "-")).date().isoformat()
@@ -140,10 +135,9 @@ def _dedupe(rows: List[Dict], keys: List[str]) -> List[Dict]:
         out.append(r)
     return out
 
-# ---------- Header maps (mirror DVSA 2024) ----------
+# ---------- Header maps ----------
 
 RESULT_ALIASES = {
-    # canonical key on right
     "test_id": "test_id",
     "vehicle_id": "vehicle_id",
     "test_date": "test_date",
@@ -159,7 +153,6 @@ RESULT_ALIASES = {
     "cylinder_capacity": "cylinder_capacity",
     "first_use_date": "first_use_date",
     "completed_date": "completed_date",
-    # legacy fallbacks
     "testid": "test_id",
     "vehicleid": "vehicle_id",
 }
@@ -171,7 +164,6 @@ ITEM_ALIASES = {
     "mot_test_rfr_location_type_id": "mot_test_rfr_location_type_id",
     "dangerous_mark": "dangerous_mark",
     "completed_date": "completed_date",
-    # legacy
     "testid": "test_id",
 }
 
@@ -187,10 +179,9 @@ def _alias(row: Dict[str, str], mapping: Dict[str, str]) -> Dict[str, str]:
 # ---------- Seed failure code lookup ----------
 
 def seed_mot_failure_codes() -> None:
-    # from lookup CSV you already provided (apps/web/etl/failure_codes.csv OR item_detail.csv)
     candidates = [
-        DATA_DIR.parent.parent / "etl" / "failure_codes.csv",    # legacy path
-        DATA_DIR / "item_detail.csv",                            # DVSA lookup
+        DATA_DIR.parent.parent / "etl" / "failure_codes.csv",
+        DATA_DIR / "item_detail.csv",
     ]
     src = next((p for p in candidates if p.exists()), None)
     if not src:
@@ -271,20 +262,16 @@ def _iter_items_file(path: Path) -> Iterator[Dict]:
 def _upsert_results(rows: List[Dict]) -> None:
     if not rows:
         return
-    # ensure one row per test_id in this statement
     rows = _dedupe(rows, ["test_id"])
     if rows:
-        print(f"[INFO] Upserting {len(rows)} results …")
         sb.table("mot_tests").upsert(rows, on_conflict="test_id").execute()
 
 
 def _upsert_items(rows: List[Dict]) -> None:
     if not rows:
         return
-    # ensure one row per composite key in this statement
     rows = _dedupe(rows, ["test_id", "rfr_id", "rfr_type_code", "mot_test_rfr_location_type_id"])
     if rows:
-        print(f"[INFO] Upserting {len(rows)} items …")
         sb.table("mot_test_items").upsert(
             rows,
             on_conflict="test_id,rfr_id,rfr_type_code,mot_test_rfr_location_type_id",
@@ -292,43 +279,43 @@ def _upsert_items(rows: List[Dict]) -> None:
 
 
 def _files_for_year(year: int, prefix: str) -> List[Path]:
-    # e.g. prefix="test_result_" or "test_item_"
     return sorted(DATA_DIR.glob(f"{prefix}{year}??.csv"))
 
 
-def load_year(year: int) -> int:
+def load_year(year: int, *, do_results: bool, do_items: bool) -> int:
     total = 0
 
-    results = _files_for_year(year, "test_result_")
-    items   = _files_for_year(year, "test_item_")
+    if do_results:
+        results = _files_for_year(year, "test_result_")
+        if results:
+            print(f"[INFO] Reading TESTRESULT files for {year} ({len(results)}) …")
+        for f in results:
+            print(f"[INFO]  -> {f.name}")
+            batch: List[Dict] = []
+            flushed = 0
+            for row in _iter_results_file(f):
+                batch.append(row)
+                if len(batch) >= BATCH_SIZE:
+                    _upsert_results(batch); flushed += len(batch); total += len(batch); batch.clear()
+            if batch:
+                _upsert_results(batch); flushed += len(batch); total += len(batch)
+            print(f"[INFO] Finished {f.name} (rows sent: {flushed})")
 
-    if results:
-        print(f"[INFO] Reading monthly TESTRESULT files for {year} ({len(results)}) …")
-    for f in results:
-        print(f"[INFO]  -> {f.name}")
-        batch: List[Dict] = []
-        for row in _iter_results_file(f):
-            batch.append(row)
-            if len(batch) >= BATCH_SIZE:
-                _upsert_results(batch)
-                total += len(batch)
-                batch.clear()
-        if batch:
-            _upsert_results(batch)
-            total += len(batch)
-
-    if items:
-        print(f"[INFO] Reading monthly TESTITEM files for {year} ({len(items)}) …")
-    for f in items:
-        print(f"[INFO]  -> {f.name}")
-        batch = []
-        for row in _iter_items_file(f):
-            batch.append(row)
-            if len(batch) >= BATCH_SIZE:
-                _upsert_items(batch)
-                batch.clear()
-        if batch:
-            _upsert_items(batch)
+    if do_items:
+        items = _files_for_year(year, "test_item_")
+        if items:
+            print(f"[INFO] Reading TESTITEM files for {year} ({len(items)}) …")
+        for f in items:
+            print(f"[INFO]  -> {f.name}")
+            batch: List[Dict] = []
+            flushed = 0
+            for row in _iter_items_file(f):
+                batch.append(row)
+                if len(batch) >= BATCH_SIZE:
+                    _upsert_items(batch); flushed += len(batch); batch.clear()
+            if batch:
+                _upsert_items(batch); flushed += len(batch)
+            print(f"[INFO] Finished {f.name} (rows sent: {flushed})")
 
     return total
 
@@ -337,7 +324,6 @@ def _detect_years() -> List[int]:
     env = os.getenv("YEARS")
     if env:
         return [int(y.strip()) for y in env.split(",") if y.strip()]
-    # autodetect from filenames
     ys = set()
     for p in DATA_DIR.glob("test_result_*.csv"):
         ys.add(int(p.stem.split("_")[2][:4]))
@@ -355,9 +341,12 @@ def main():
         return
     print(f"[INFO] Loading years: {years}")
 
+    do_results = LOAD_MODE in ("both", "results")
+    do_items   = LOAD_MODE in ("both", "items")
+
     grand_total = 0
     for y in years:
-        grand_total += load_year(y)
+        grand_total += load_year(y, do_results=do_results, do_items=do_items)
 
     print(f"[DONE] Total upserts into mot_tests: {grand_total}")
 
