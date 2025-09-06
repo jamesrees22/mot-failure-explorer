@@ -70,8 +70,8 @@ def _open_csv(path: Path) -> Iterator[Dict[str, str]]:
                 reader = csv.DictReader(f, delimiter=chosen_delim)
                 for row in reader:
                     # normalize keys/values
-                    yield { (k or "").strip(): (v.strip() if isinstance(v, str) else v)
-                            for k, v in row.items() }
+                    yield {(k or "").strip(): (v.strip() if isinstance(v, str) else v)
+                           for k, v in row.items()}
             return
         except UnicodeDecodeError as e:
             last_err = e
@@ -117,6 +117,18 @@ def _to_bool(s: str | None) -> bool | None:
         return False
     return None
 
+
+def _dedupe(rows: List[Dict], keys: List[str]) -> List[Dict]:
+    """Return rows with unique key tuples per batch; keep the first occurrence."""
+    seen = set()
+    out: List[Dict] = []
+    for r in rows:
+        key = tuple(r.get(k) for k in keys)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
 
 # ---------- Header maps (mirror DVSA 2024) ----------
 
@@ -249,16 +261,24 @@ def _iter_items_file(path: Path) -> Iterator[Dict]:
 def _upsert_results(rows: List[Dict]) -> None:
     if not rows:
         return
-    sb.table("mot_tests").upsert(rows, on_conflict="test_id").execute()
+    # ensure one row per test_id in this statement
+    rows = _dedupe(rows, ["test_id"])
+    if rows:
+        print(f"[INFO] Upserting {len(rows)} results …")
+        sb.table("mot_tests").upsert(rows, on_conflict="test_id").execute()
 
 
 def _upsert_items(rows: List[Dict]) -> None:
     if not rows:
         return
-    sb.table("mot_test_items").upsert(
-        rows,
-        on_conflict="test_id,rfr_id,rfr_type_code,mot_test_rfr_location_type_id",
-    ).execute()
+    # ensure one row per composite key in this statement
+    rows = _dedupe(rows, ["test_id", "rfr_id", "rfr_type_code", "mot_test_rfr_location_type_id"])
+    if rows:
+        print(f"[INFO] Upserting {len(rows)} items …")
+        sb.table("mot_test_items").upsert(
+            rows,
+            on_conflict="test_id,rfr_id,rfr_type_code,mot_test_rfr_location_type_id",
+        ).execute()
 
 
 def _files_for_year(year: int, prefix: str) -> List[Path]:
@@ -269,7 +289,6 @@ def _files_for_year(year: int, prefix: str) -> List[Path]:
 def load_year(year: int) -> int:
     total = 0
 
-    # 1) Items first or results first? Either is fine. We do results first.
     results = _files_for_year(year, "test_result_")
     items   = _files_for_year(year, "test_item_")
 
