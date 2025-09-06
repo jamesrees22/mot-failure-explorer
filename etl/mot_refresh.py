@@ -1,369 +1,337 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
-MOT ETL: supports BOTH yearly CSVs and monthly-split CSVs.
+Load DVSA MOT data (2024 monthly zips) into Supabase:
 
-Expected inputs in DATA_DIR (defaults to apps/web/etl/data):
-- Yearly:
-    TESTRESULT_YYYY.csv
-    TESTITEM_YYYY.csv
-- Monthly (new DVSA split):
-    test_result_YYYYMM.csv (12 files)
-    test_item_YYYYMM.csv   (12 files)
-- Lookups:
-    item_detail.csv  (for RfR code/description)
-    (item_group.csv, mdr_*.csv optional)
+- mot_tests           ← Test Results CSVs (test_result_YYYYMM.csv)
+- mot_test_items      ← Test Items CSVs   (test_item_YYYYMM.csv)
+- mot_failure_codes   ← seeded from item_detail.csv (lookup)
 
-Outputs (Supabase / Postgres):
-- mot_failure_codes(code, description)  -- seeded from item_detail.csv
-- mot_tests(...)                        -- 1 row per test, with failure_reasons TEXT[]
+Idempotent upserts:
+- mot_tests.on_conflict = test_id
+- mot_test_items.on_conflict = test_id,rfr_id,rfr_type_code,mot_test_rfr_location_type_id
+
+Env:
+  SUPABASE_URL
+  SUPABASE_SERVICE_ROLE_KEY
+  YEARS="2024" (comma-separated ok)
+  DATA_DIR (optional; default apps/web/etl/data)
+  BATCH_SIZE (optional; default 10000)
 """
 
+from __future__ import annotations
 import csv
 import os
-import re
-import sys
 from pathlib import Path
-from collections import defaultdict
-from typing import Dict, Iterable, Iterator, List, Tuple
+from typing import Dict, Iterator, List
+from datetime import datetime
 
-# ------------ Config ------------
-DATA_DIR = Path(os.getenv("LOCAL_MOT_DIR", "apps/web/etl/data")).resolve()
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5000"))
+from supabase import create_client
 
-SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # service role key (server-side)
+# ---------- Config ----------
+DEFAULT_DATA_DIR = Path("apps/web/etl/data")
+DATA_DIR = Path(os.getenv("DATA_DIR") or DEFAULT_DATA_DIR)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE") or "10000")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    print("[FATAL] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set.")
-    sys.exit(1)
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# Supabase client
-try:
-    from supabase import create_client, Client  # type: ignore
-except Exception as e:
-    print("[FATAL] Missing supabase-py. Run: pip install supabase")
-    raise
+print(f"[INFO] DATA_DIR = {DATA_DIR.resolve()}")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ------------ Helpers ------------
-
-def _glob_files(patterns: List[str]) -> List[Path]:
-    out: List[Path] = []
-    for pat in patterns:
-        out.extend(DATA_DIR.glob(pat))
-    # sort for stable YYYYMM ordering
-    return sorted(out, key=lambda p: p.name.lower())
-
-def _find_yearly_files(year: int) -> Tuple[Path, Path]:
-    """
-    Return (TESTRESULT_YYYY.csv, TESTITEM_YYYY.csv) if both exist, else (None, None).
-    Case-insensitive.
-    """
-    candidates_result = _glob_files([
-        f"TESTRESULT_{year}.csv",
-        f"testresult_{year}.csv",
-    ])
-    candidates_item = _glob_files([
-        f"TESTITEM_{year}.csv",
-        f"testitem_{year}.csv",
-    ])
-    if candidates_result and candidates_item:
-        return candidates_result[0], candidates_item[0]
-    return None, None  # type: ignore
-
-def _find_monthly_files(year: int) -> Tuple[List[Path], List[Path]]:
-    """
-    Return sorted lists of monthly files for result and item.
-    Eg test_result_YYYYMM.csv, test_item_YYYYMM.csv
-    """
-    res_files = _glob_files([f"test_result_{year}??.csv", f"TEST_RESULT_{year}??.csv"])
-    itm_files = _glob_files([f"test_item_{year}??.csv", f"TEST_ITEM_{year}??.csv"])
-    return res_files, itm_files
-
-def _has_header(path: Path) -> bool:
-    # DVSA files have headers. We'll always treat first row as header.
-    return True
+# ---------- Helpers ----------
 
 def _open_csv(path: Path) -> Iterator[Dict[str, str]]:
     """
-    Open a DVSA pipe-delimited CSV with headers.
-    Tries UTF-8 (with BOM) first, then CP1252, then Latin-1 as fallback.
+    Open a DVSA CSV with headers.
+    - Auto-detect delimiter (pipe vs comma) from the first line
+    - Tolerant decoding: utf-8-sig → cp1252 → latin-1
     """
     encodings = ["utf-8-sig", "cp1252", "latin-1"]
     last_err = None
+
+    # detect delimiter
+    chosen_delim = None
     for enc in encodings:
         try:
             with path.open("r", encoding=enc, newline="") as f:
-                reader = csv.DictReader(f, delimiter="|")
+                header_line = f.readline()
+            chosen_delim = "|" if header_line.count("|") >= header_line.count(",") else ","
+            break
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    if chosen_delim is None:
+        raise last_err or UnicodeDecodeError("utf-8", b"", 0, 1, "Unknown decode error")
+
+    # reopen and stream rows
+    for enc in encodings:
+        try:
+            with path.open("r", encoding=enc, newline="") as f:
+                reader = csv.DictReader(f, delimiter=chosen_delim)
                 for row in reader:
+                    # normalize keys/values
                     yield { (k or "").strip(): (v.strip() if isinstance(v, str) else v)
                             for k, v in row.items() }
             return
         except UnicodeDecodeError as e:
             last_err = e
             continue
-    # If we tried all encodings and still failed, raise the last error
     raise last_err or UnicodeDecodeError("utf-8", b"", 0, 1, "Unknown decode error")
 
 
-def _normalise_result_headers(row: Dict[str, str]) -> Dict[str, str]:
-    """
-    DVSA headers differ slightly between years. Map common aliases.
-    """
-    m = {k.lower(): v for k, v in row.items()}
+def _parse_date(s: str | None) -> str | None:
+    if not s:
+        return None
+    s = s.strip()
+    # accept YYYY-MM-DD or DD/MM/YYYY or YYYY/MM/DD
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            pass
+    # already ISO? (defensive)
+    if len(s) == 10 and s[4] in "-/" and s[7] in "-/":
+        try:
+            return datetime.fromisoformat(s.replace("/", "-")).date().isoformat()
+        except Exception:
+            return None
+    return None
 
-    # Common fields we care about
-    return {
-        "testid": m.get("testid") or m.get("test_id"),
-        "testdate": m.get("testdate") or m.get("test_date"),
-        "make": m.get("make"),
-        "model": m.get("model"),
-        "firstusedate": m.get("firstusedate") or m.get("first_use_date") or m.get("first_use_dt"),
-        "testresult": m.get("testresult") or m.get("test_result"),
-        "testclassid": m.get("testclassid") or m.get("test_class_id"),
-        "fueltype": m.get("fueltype") or m.get("fuel_type"),
-        "testtype": m.get("testtype") or m.get("test_type"),
-        "testmileage": m.get("testmileage") or m.get("odometer"),
-    }
 
-def _normalise_item_headers(row: Dict[str, str]) -> Dict[str, str]:
-    m = {k.lower(): v for k, v in row.items()}
-    return {
-        "testid": m.get("testid") or m.get("test_id"),
-        "rfrid": m.get("rfrid") or m.get("rfr_id") or m.get("reason_id"),
-        "rfrtype": m.get("rfrtype") or m.get("rfr_type"),
-    }
+def _to_int(s: str | None) -> int | None:
+    if s is None or s == "":
+        return None
+    try:
+        return int(float(s))
+    except Exception:
+        return None
 
-def _year_from_date(iso_date: str) -> int:
-    if not iso_date:
-        return None  # type: ignore
-    return int(iso_date[:4])
 
-def _chunk(it: Iterable, size: int) -> Iterator[List]:
-    buf = []
-    for x in it:
-        buf.append(x)
-        if len(buf) >= size:
-            yield buf
-            buf = []
-    if buf:
-        yield buf
+def _to_bool(s: str | None) -> bool | None:
+    if s is None:
+        return None
+    t = s.strip().lower()
+    if t in ("true", "t", "1", "y", "yes"):
+        return True
+    if t in ("false", "f", "0", "n", "no"):
+        return False
+    return None
 
-# ------------ Load lookups ------------
+
+# ---------- Header maps (mirror DVSA 2024) ----------
+
+RESULT_ALIASES = {
+    # canonical key on right
+    "test_id": "test_id",
+    "vehicle_id": "vehicle_id",
+    "test_date": "test_date",
+    "test_class_id": "test_class_id",
+    "test_type": "test_type",
+    "test_result": "test_result",
+    "test_mileage": "test_mileage",
+    "postcode_area": "postcode_area",
+    "make": "make",
+    "model": "model",
+    "colour": "colour",
+    "fuel_type": "fuel_type",
+    "cylinder_capacity": "cylinder_capacity",
+    "first_use_date": "first_use_date",
+    "completed_date": "completed_date",
+    # legacy fallbacks
+    "testid": "test_id",
+    "vehicleid": "vehicle_id",
+}
+
+ITEM_ALIASES = {
+    "test_id": "test_id",
+    "rfr_id": "rfr_id",
+    "rfr_type_code": "rfr_type_code",
+    "mot_test_rfr_location_type_id": "mot_test_rfr_location_type_id",
+    "dangerous_mark": "dangerous_mark",
+    "completed_date": "completed_date",
+    # legacy
+    "testid": "test_id",
+}
+
+
+def _alias(row: Dict[str, str], mapping: Dict[str, str]) -> Dict[str, str]:
+    out = {}
+    for k, v in row.items():
+        kk = mapping.get((k or "").lower(), (k or "").lower())
+        out[kk] = v
+    return out
+
+
+# ---------- Seed failure code lookup ----------
 
 def seed_mot_failure_codes() -> None:
-    """
-    Seed/update rfr code -> description from item_detail.csv
-    Keeps just two columns in mot_failure_codes: code, description
-    """
-    detail_paths = _glob_files(["item_detail.csv", "ITEM_DETAIL.csv"])
-    if not detail_paths:
-        print("[WARN] item_detail.csv not found; skipping mot_failure_codes seed.")
+    # from lookup CSV you already provided (apps/web/etl/failure_codes.csv OR item_detail.csv)
+    candidates = [
+        DATA_DIR.parent.parent / "etl" / "failure_codes.csv",    # legacy path
+        DATA_DIR / "item_detail.csv",                            # DVSA lookup
+    ]
+    src = next((p for p in candidates if p.exists()), None)
+    if not src:
+        print("[INFO] No failure code lookup CSV found; skipping seed.")
         return
 
-    path = detail_paths[0]
-    print(f"[INFO] Seeding mot_failure_codes from {path.name} …")
-
-    seen = {}
-    for row in _open_csv(path):
-        # item_detail has rfrid, testclassid, rfrdesc
-        r = {k.lower(): v for k, v in row.items()}
-        code = r.get("rfrid") or r.get("rfr_id")
-        desc = r.get("rfrdesc") or r.get("rfr_desc") or r.get("rfr_description")
-        if not code or not desc:
-            continue
-        # Prefer the longest description we've seen for the same code
-        if code not in seen or len(desc) > len(seen[code]):
-            seen[code] = desc
-
-    if not seen:
-        print("[WARN] item_detail.csv had no usable rows; skipping.")
-        return
-
-    payload = [{"code": str(k), "description": v} for k, v in seen.items()]
-    for batch in _chunk(payload, 2000):
-        res = supabase.table("mot_failure_codes").upsert(
-            batch,
-            on_conflict="code",
-            ignore_duplicates=False
-        ).execute()
-        if getattr(res, "error", None):
-            print("[ERROR] Upsert mot_failure_codes:", res.error)
-            raise RuntimeError(res.error)
-    print(f"[INFO] Seeded/updated {len(payload)} mot_failure_codes.")
-
-# ------------ Build per-test failure reasons from TESTITEM ------------
-
-def collect_failure_reasons_for_year(year: int) -> Dict[str, List[str]]:
-    """
-    Returns dict: testid -> list[rfrid as text], across either monthly or yearly TESTITEM files.
-    We collect ALL defect types and let views decide (F+P) vs advisory/minor. If you prefer,
-    filter here to ('F','P').
-    """
-    yearly_item, _ = _find_yearly_files(year)
-    if yearly_item and yearly_item.exists():
-        item_files = [yearly_item.parent / f"TESTITEM_{year}.csv"]
-    else:
-        _, monthly_item_files = _find_monthly_files(year)
-        item_files = monthly_item_files
-
-    if not item_files:
-        print(f"[WARN] No TESTITEM files found for {year}.")
-        return {}
-
-    print(f"[INFO] Scanning TESTITEM rows for {year} ({len(item_files)} file(s)) …")
-    by_testid: Dict[str, List[str]] = defaultdict(list)
-
-    for f in item_files:
-        print(f"[INFO]  -> {f.name}")
-        for raw in _open_csv(f):
-            row = _normalise_item_headers(raw)
-            testid = row.get("testid")
-            rfrid = row.get("rfrid")
-            rfrtype = (row.get("rfrtype") or "").upper()
-
-            if not testid or not rfrid:
-                continue
-
-            # If you want initial-fail only at load time, uncomment:
-            # if rfrtype not in ("F", "P"):
-            #     continue
-
-            by_testid[testid].append(str(rfrid))
-
-    return by_testid
-
-# ------------ Load TESTRESULT + stitch items → mot_tests ------------
-
-def load_year(year: int) -> int:
-    """
-    Load a year using yearly or monthly result files, stitching in failure reasons.
-    Returns inserted/updated row count.
-    """
-    result_yearly, item_yearly = _find_yearly_files(year)
-    monthly_res_files, monthly_item_files = _find_monthly_files(year)
-
-    use_yearly = result_yearly and item_yearly
-    use_monthly = bool(monthly_res_files and monthly_item_files)
-
-    if not (use_yearly or use_monthly):
-        print(f"[WARN] No TESTRESULT/TESTITEM files found for {year}. Skipping.")
-        return 0
-
-    # Pre-collect failure reasons map for the year (from either yearly or monthly items)
-    testid_to_rfrs = collect_failure_reasons_for_year(year)
-
-    def _iter_result_rows() -> Iterator[Dict[str, str]]:
-        if use_yearly:
-            f = Path(result_yearly.parent / f"TESTRESULT_{year}.csv")
-            print(f"[INFO] Reading {f.name} …")
-            yield from (_normalise_result_headers(r) for r in _open_csv(f))
-        else:
-            print(f"[INFO] Reading monthly TESTRESULT files for {year} ({len(monthly_res_files)}) …")
-            for f in monthly_res_files:
-                print(f"[INFO]  -> {f.name}")
-                for r in _open_csv(f):
-                    yield _normalise_result_headers(r)
-
-    def _row_to_record(row: Dict[str, str]) -> Dict:
-        testid = row["testid"]
-        testdate = row["testdate"]
-        make = row.get("make") or ""
-        model = row.get("model") or ""
-        firstusedate = row.get("firstusedate") or None
-        testresult = (row.get("testresult") or "").upper()
-        testclassid = row.get("testclassid") or None
-        fueltype = row.get("fueltype") or None
-        testtype = row.get("testtype") or None
-        testmileage = row.get("testmileage") or None
-
-        first_use_year = _year_from_date(firstusedate) if firstusedate else None
-        rfrs = testid_to_rfrs.get(testid, [])
-        # Build record compatible with mot_tests table you already use
-        rec = {
-            "test_id": int(testid) if testid and testid.isdigit() else testid,
-            "test_date": testdate,
-            "make": make,
-            "model": model,
-            "first_use_year": first_use_year,
-            "test_result": testresult,
-            "test_class_id": testclassid,
-            "fuel_type": fueltype,
-            "test_type": testtype,
-            "test_mileage": int(testmileage) if (testmileage and testmileage.isdigit()) else None,
-            "failure_reasons": rfrs,  # TEXT[] in Postgres
-        }
-        return rec
-
-    # Stream → batch upserts
+    print("[INFO] Seeding mot_failure_codes from", src.name, "…")
     total = 0
+    seen: set[str] = set()
     batch: List[Dict] = []
-    for row in _iter_result_rows():
-        if not row.get("testid"):
-            continue
-        batch.append(_row_to_record(row))
-        if len(batch) >= BATCH_SIZE:
-            _upsert_mot_tests(batch)
+
+    def flush():
+        nonlocal batch, total
+        if batch:
+            sb.table("mot_failure_codes").upsert(batch, on_conflict="code").execute()
             total += len(batch)
             batch.clear()
-    if batch:
-        _upsert_mot_tests(batch)
-        total += len(batch)
 
-    print(f"[INFO] Upserted {total} mot_tests rows for {year}.")
+    for r in _open_csv(src):
+        code = (r.get("code") or r.get("rfr_id") or "").strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        desc = (r.get("description") or r.get("rfr_id_description") or "").strip()
+        batch.append({"code": code, "description": desc})
+        if len(batch) >= BATCH_SIZE:
+            flush()
+    flush()
+
+    print(f"[INFO] Seeded/updated {total} mot_failure_codes.")
+
+# ---------- Loaders ----------
+
+def _iter_results_file(path: Path) -> Iterator[Dict]:
+    for raw in _open_csv(path):
+        r = _alias(raw, RESULT_ALIASES)
+        test_id = _to_int(r.get("test_id"))
+        if not test_id:
+            continue
+        yield {
+            "test_id": test_id,
+            "vehicle_id": _to_int(r.get("vehicle_id")),
+            "test_date": _parse_date(r.get("test_date")),
+            "test_class_id": r.get("test_class_id") or None,
+            "test_type": r.get("test_type") or None,
+            "test_result": (r.get("test_result") or "").upper() or None,
+            "test_mileage": _to_int(r.get("test_mileage")),
+            "postcode_area": r.get("postcode_area") or None,
+            "make": r.get("make") or None,
+            "model": r.get("model") or None,
+            "colour": r.get("colour") or None,
+            "fuel_type": r.get("fuel_type") or None,
+            "cylinder_capacity": _to_int(r.get("cylinder_capacity")),
+            "first_use_date": _parse_date(r.get("first_use_date")),
+            "completed_date": _parse_date(r.get("completed_date")),
+        }
+
+
+def _iter_items_file(path: Path) -> Iterator[Dict]:
+    for raw in _open_csv(path):
+        r = _alias(raw, ITEM_ALIASES)
+        test_id = _to_int(r.get("test_id"))
+        rfr_id = (r.get("rfr_id") or "").strip()
+        rfr_type = (r.get("rfr_type_code") or "").strip()
+        loc = (r.get("mot_test_rfr_location_type_id") or "").strip()
+        if not (test_id and rfr_id and rfr_type and loc):
+            continue
+        yield {
+            "test_id": test_id,
+            "rfr_id": rfr_id,
+            "rfr_type_code": rfr_type,
+            "mot_test_rfr_location_type_id": loc,
+            "dangerous_mark": _to_bool(r.get("dangerous_mark")),
+            "completed_date": _parse_date(r.get("completed_date")),
+        }
+
+
+def _upsert_results(rows: List[Dict]) -> None:
+    if not rows:
+        return
+    sb.table("mot_tests").upsert(rows, on_conflict="test_id").execute()
+
+
+def _upsert_items(rows: List[Dict]) -> None:
+    if not rows:
+        return
+    sb.table("mot_test_items").upsert(
+        rows,
+        on_conflict="test_id,rfr_id,rfr_type_code,mot_test_rfr_location_type_id",
+    ).execute()
+
+
+def _files_for_year(year: int, prefix: str) -> List[Path]:
+    # e.g. prefix="test_result_" or "test_item_"
+    return sorted(DATA_DIR.glob(f"{prefix}{year}??.csv"))
+
+
+def load_year(year: int) -> int:
+    total = 0
+
+    # 1) Items first or results first? Either is fine. We do results first.
+    results = _files_for_year(year, "test_result_")
+    items   = _files_for_year(year, "test_item_")
+
+    if results:
+        print(f"[INFO] Reading monthly TESTRESULT files for {year} ({len(results)}) …")
+    for f in results:
+        print(f"[INFO]  -> {f.name}")
+        batch: List[Dict] = []
+        for row in _iter_results_file(f):
+            batch.append(row)
+            if len(batch) >= BATCH_SIZE:
+                _upsert_results(batch)
+                total += len(batch)
+                batch.clear()
+        if batch:
+            _upsert_results(batch)
+            total += len(batch)
+
+    if items:
+        print(f"[INFO] Reading monthly TESTITEM files for {year} ({len(items)}) …")
+    for f in items:
+        print(f"[INFO]  -> {f.name}")
+        batch = []
+        for row in _iter_items_file(f):
+            batch.append(row)
+            if len(batch) >= BATCH_SIZE:
+                _upsert_items(batch)
+                batch.clear()
+        if batch:
+            _upsert_items(batch)
+
     return total
 
-def _upsert_mot_tests(batch: List[Dict]) -> None:
-    res = supabase.table("mot_tests").upsert(
-        batch,
-        on_conflict="test_id",
-        ignore_duplicates=False
-    ).execute()
-    if getattr(res, "error", None):
-        print("[ERROR] Upsert mot_tests:", res.error)
-        raise RuntimeError(res.error)
 
-# ------------ Entry point ------------
+def _detect_years() -> List[int]:
+    env = os.getenv("YEARS")
+    if env:
+        return [int(y.strip()) for y in env.split(",") if y.strip()]
+    # autodetect from filenames
+    ys = set()
+    for p in DATA_DIR.glob("test_result_*.csv"):
+        ys.add(int(p.stem.split("_")[2][:4]))
+    for p in DATA_DIR.glob("test_item_*.csv"):
+        ys.add(int(p.stem.split("_")[2][:4]))
+    return sorted(ys)
+
 
 def main():
-    print(f"[INFO] DATA_DIR = {DATA_DIR}")
-    if not DATA_DIR.exists():
-        print(f"[FATAL] DATA_DIR does not exist: {DATA_DIR}")
-        sys.exit(1)
-
-    # 1) Seed failure codes (safe to run every time)
     seed_mot_failure_codes()
 
-    # 2) Decide which years to load.
-    #    If you want a quick win, set YEARS env like "2024,2023".
-    years_env = os.getenv("YEARS")
-    if years_env:
-        years = [int(y.strip()) for y in years_env.split(",") if y.strip().isdigit()]
-    else:
-        # Autodiscover years from filenames present in DATA_DIR
-        years = _discover_years()
-
+    years = _detect_years()
     if not years:
-        print("[WARN] No years discovered. Place files in DATA_DIR or set YEARS env.")
+        print("[WARN] No YEARS detected/found. Put CSVs into", DATA_DIR)
         return
-
     print(f"[INFO] Loading years: {years}")
+
     grand_total = 0
     for y in years:
         grand_total += load_year(y)
 
-    print(f"[DONE] Total upserts: {grand_total}")
+    print(f"[DONE] Total upserts into mot_tests: {grand_total}")
 
-def _discover_years() -> List[int]:
-    years = set()
-    for p in DATA_DIR.glob("*.csv"):
-        m = re.search(r"(20\d{2})", p.name)
-        if m:
-            years.add(int(m.group(1)))
-    return sorted(years)
 
 if __name__ == "__main__":
     main()
