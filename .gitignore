@@ -3,13 +3,20 @@ node_modules/
 .next/
 out/
 .env*
+
 # Python
 __pycache__/
 *.pyc
 .venv/
+
 # Misc
 .DS_Store
-# Ignore only large monthly datasets (keep lookups tracked)
-apps/web/etl/data/test_result_*.csv
-apps/web/etl/data/test_item_*.csv
-apps/web/etl/data/*.zip
+
+# Ignore all contents of apps/web/etl/data by default
+apps/web/etl/data/*
+
+# Allow marker + small lookup files
+!apps/web/etl/data/.gitkeep
+!apps/web/etl/data/item_detail.csv
+!apps/web/etl/data/item_group.csv
+!apps/web/etl/data/mdr_*.csv
