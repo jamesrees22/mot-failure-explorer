@@ -14,6 +14,10 @@ Env:
   BATCH_SIZE (default 1000)   # lower = fewer timeouts
   LOAD = "both" | "results" | "items"  (default "both")
   UPSERT_MODE = "insert" | "upsert"     (default "insert")
+
+  # NEW: limit which files are processed without moving files around
+  RESULTS_GLOB="test_result_202401.csv"
+  ITEMS_GLOB="test_item_202401.csv"
 """
 
 from __future__ import annotations
@@ -43,6 +47,10 @@ BATCH_SIZE   = int(os.getenv("BATCH_SIZE") or "1000")
 LOAD_MODE    = (os.getenv("LOAD") or "both").strip().lower()
 UPSERT_MODE  = (os.getenv("UPSERT_MODE") or "insert").strip().lower()
 
+# NEW: optional per-file patterns
+RESULTS_GLOB = os.getenv("RESULTS_GLOB")  # e.g. "test_result_202401.csv"
+ITEMS_GLOB   = os.getenv("ITEMS_GLOB")    # e.g. "test_item_202401.csv"
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -51,6 +59,10 @@ p(f"[INFO] DATA_DIR   = {DATA_DIR.resolve()}")
 p(f"[INFO] LOAD_MODE  = {LOAD_MODE}")
 p(f"[INFO] UPSERT_MODE= {UPSERT_MODE}")
 p(f"[INFO] BATCH_SIZE = {BATCH_SIZE}")
+if RESULTS_GLOB:
+    p(f"[INFO] RESULTS_GLOB = {RESULTS_GLOB}")
+if ITEMS_GLOB:
+    p(f"[INFO] ITEMS_GLOB   = {ITEMS_GLOB}")
 
 # ---------- Global de-dupe sets ----------
 SEEN_TEST_IDS: set[int] = set()
@@ -77,8 +89,8 @@ def _open_csv(path: Path) -> Iterator[Dict[str, str]]:
             with path.open("r", encoding=enc, newline="") as f:
                 rdr = csv.DictReader(f, delimiter=delim)
                 for row in rdr:
-                    yield { (k or "").strip(): (v.strip() if isinstance(v, str) else v)
-                            for k, v in row.items() }
+                    yield {(k or "").strip(): (v.strip() if isinstance(v, str) else v)
+                           for k, v in row.items()}
             return
         except UnicodeDecodeError as e:
             last_err = e
@@ -263,8 +275,17 @@ def _send_items(rows: List[Dict]) -> None:
         sb.table("mot_test_items").insert(filtered).execute()
 
 # ---------- File helpers ----------
-def _files_for_year(year: int, prefix: str) -> List[Path]:
-    return sorted(DATA_DIR.glob(f"{prefix}{year}??.csv"))
+def _files_results(year: int) -> List[Path]:
+    """Use RESULTS_GLOB if set, else default year pattern."""
+    if RESULTS_GLOB:
+        return sorted(DATA_DIR.glob(RESULTS_GLOB))
+    return sorted(DATA_DIR.glob(f"test_result_{year}??.csv"))
+
+def _files_items(year: int) -> List[Path]:
+    """Use ITEMS_GLOB if set, else default year pattern."""
+    if ITEMS_GLOB:
+        return sorted(DATA_DIR.glob(ITEMS_GLOB))
+    return sorted(DATA_DIR.glob(f"test_item_{year}??.csv"))
 
 def _detect_years() -> List[int]:
     env = os.getenv("YEARS")
@@ -279,7 +300,7 @@ def _detect_years() -> List[int]:
 def load_year(year: int, *, do_results: bool, do_items: bool) -> tuple[int,int]:
     total_r, total_i = 0, 0
     if do_results:
-        res = _files_for_year(year, "test_result_")
+        res = _files_results(year)
         if res: p(f"[INFO] Reading TESTRESULT files for {year} ({len(res)}) …")
         for f in res:
             p(f"[INFO]  -> {f.name}")
@@ -292,7 +313,7 @@ def load_year(year: int, *, do_results: bool, do_items: bool) -> tuple[int,int]:
                 _send_results(batch); flushed += len(batch); total_r += len(batch)
             p(f"[INFO] Finished {f.name} (rows sent: {flushed})")
     if do_items:
-        its = _files_for_year(year, "test_item_")
+        its = _files_items(year)
         if its: p(f"[INFO] Reading TESTITEM files for {year} ({len(its)}) …")
         for f in its:
             p(f"[INFO]  -> {f.name}")
