@@ -21,11 +21,21 @@ Env:
 from __future__ import annotations
 import csv
 import os
+import sys
 from pathlib import Path
 from typing import Dict, Iterator, List
 from datetime import datetime
 
 from supabase import create_client
+
+# ---------- CSV field size bump (avoid "_csv.Error: field larger than field limit") ----------
+_max = sys.maxsize
+while True:
+    try:
+        csv.field_size_limit(_max)
+        break
+    except OverflowError:
+        _max = int(_max / 10)
 
 # ---------- Config ----------
 DEFAULT_DATA_DIR = Path("apps/web/etl/data")
