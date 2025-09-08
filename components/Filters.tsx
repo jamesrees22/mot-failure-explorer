@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 export type Filters = {
   make?: string;
@@ -11,14 +12,22 @@ export type Filters = {
 
 export default function FiltersBar({
   options,
-  onChange
+  initial
 }: {
   options: Record<keyof Filters, string[]>;
-  onChange: (f: Filters) => void;
+  initial?: Filters;
 }) {
-  const [filters, setFilters] = useState<Filters>({});
+  const router = useRouter();
+  const [filters, setFilters] = useState<Filters>(initial ?? {});
 
-  useEffect(() => onChange(filters), [filters, onChange]);
+  // whenever filters change, push to URL (no scroll)
+  useEffect(() => {
+    const params = new URLSearchParams();
+    (Object.entries(filters) as [keyof Filters, string | undefined][])
+      .forEach(([k, v]) => { if (v) params.set(k, v); });
+    const qs = params.toString();
+    router.push(qs ? `/?${qs}` : "/", { scroll: false });
+  }, [filters, router]);
 
   function Select({ label, field }: { label: string; field: keyof Filters }) {
     const opts = options[field] ?? [];
@@ -28,10 +37,14 @@ export default function FiltersBar({
         <select
           className="bg-bg border border-white/10 rounded-xl px-3 py-2"
           value={(filters[field] as string) || ""}
-          onChange={(e) => setFilters((f) => ({ ...f, [field]: e.target.value || undefined }))}
+          onChange={(e) =>
+            setFilters((f) => ({ ...f, [field]: e.target.value || undefined }))
+          }
         >
           <option value="">All</option>
-          {opts.map((o) => (<option key={o} value={o}>{o}</option>))}
+          {opts.map((o) => (
+            <option key={o} value={o}>{o}</option>
+          ))}
         </select>
       </label>
     );

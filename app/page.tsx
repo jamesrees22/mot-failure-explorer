@@ -26,7 +26,6 @@ async function fetchData(filters: Filters) {
   const byCat: Record<string, number> = {};
   const byMonth: Record<string, number> = {};
   const byMake: Record<string, number> = {};
-
   (data ?? []).forEach((r: any) => {
     byCat[r.failure_category] = (byCat[r.failure_category] || 0) + r.failure_count;
     byMonth[r.month_year] = (byMonth[r.month_year] || 0) + r.failure_count;
@@ -61,15 +60,8 @@ export default async function Page({ searchParams }: { searchParams: Filters }) 
         <div className="text-xs font-mono text-soft">LAST UPDATE: 2024-12-31 23:59 UTC</div>
       </div>
 
-      <FiltersBar
-        options={options}
-        onChange={(f) => {
-          const params = new URLSearchParams();
-          Object.entries(f).forEach(([k, v]) => v && params.set(k, v));
-          const qs = params.toString();
-          window.location.search = qs;
-        }}
-      />
+      {/* pass only serializable props */}
+      <FiltersBar options={options} initial={filters} />
 
       <KPIs totalFailures={totalFailures} topCategory={topCategory} topMake={topMake} period={period} />
 
