@@ -1,26 +1,48 @@
+export const revalidate = 0; // disable caching for this page
 import { supabase } from "@/lib/supabase";
 import { distinctValues } from "@/lib/distinct";
 import FiltersBar, { Filters } from "@/components/Filters";
 import KPIs from "@/components/KPIs";
 import { CategoryBar, TrendLine } from "@/components/Charts";
 
+function uniqPreserve<T>(arr: T[]) {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const v of arr) {
+    const key = String(v ?? "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+  return out;
+}
+
 async function fetchOptions(filters?: Filters) {
   const [{ data: makes }, { data: models }, { data: cats }, { data: miles }, { data: months }] = await Promise.all([
-    supabase.from("mv_mot24_makes").select("make").order("failures", { ascending: false }),
+    // A→Z explicitly
+    supabase.from("mv_mot24_makes").select("make").order("make", { ascending: true }),
     filters?.make
-      ? supabase.from("mv_mot24_models").select("model").eq("make", filters.make)
-      : supabase.from("mv_mot24_models").select("model").limit(2000),
-    supabase.from("mv_mot24_categories").select("failure_category"),
-    supabase.from("mv_mot24_mileage").select("mileage_bucket"),
-    supabase.from("mv_mot24_months").select("month_year")
+      ? supabase
+          .from("mv_mot24_models")
+          .select("model")
+          .eq("make", filters.make)
+          .order("model", { ascending: true })
+      : supabase
+          .from("mv_mot24_models")
+          .select("model")
+          .order("model", { ascending: true })
+          .limit(5000),
+    supabase.from("mv_mot24_categories").select("failure_category").order("failure_category", { ascending: true }),
+    supabase.from("mv_mot24_mileage").select("mileage_bucket").order("mileage_bucket", { ascending: true }),
+    supabase.from("mv_mot24_months").select("month_year").order("month_year", { ascending: true })
   ]);
 
   return {
-    make: Array.from(new Set((makes ?? []).map((r: any) => r.make))).filter(Boolean),
-    model: Array.from(new Set((models ?? []).map((r: any) => r.model))).filter(Boolean),
-    failure_category: Array.from(new Set((cats ?? []).map((r: any) => r.failure_category))).filter(Boolean),
-    mileage_bucket: Array.from(new Set((miles ?? []).map((r: any) => r.mileage_bucket))).filter(Boolean),
-    month_year: Array.from(new Set((months ?? []).map((r: any) => r.month_year))).filter(Boolean)
+    make: uniqPreserve((makes ?? []).map((r: any) => r.make)),
+    model: uniqPreserve((models ?? []).map((r: any) => r.model)),
+    failure_category: uniqPreserve((cats ?? []).map((r: any) => r.failure_category)),
+    mileage_bucket: uniqPreserve((miles ?? []).map((r: any) => r.mileage_bucket)),
+    month_year: uniqPreserve((months ?? []).map((r: any) => r.month_year))
   };
 }
 
