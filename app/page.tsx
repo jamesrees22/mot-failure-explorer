@@ -8,11 +8,11 @@ async function fetchOptions(filters?: Filters) {
   const [{ data: makes }, { data: models }, { data: cats }, { data: miles }, { data: months }] = await Promise.all([
     supabase.from("mv_mot24_makes").select("make").order("failures", { ascending: false }),
     filters?.make
-      ? supabase.from("mv_mot24_models").select("model").eq("make", filters.make).order("failures", { ascending: false })
-      : supabase.from("mv_mot24_models").select("model").order("failures", { ascending: false }).limit(2000),
-    supabase.from("mv_mot24_categories").select("failure_category").order("failures", { ascending: false }),
-    supabase.from("mv_mot24_mileage").select("mileage_bucket").order("mileage_bucket", { ascending: true }),
-    supabase.from("mv_mot24_months").select("month_year").order("month_year", { ascending: true })
+      ? supabase.from("mv_mot24_models").select("model").eq("make", filters.make)
+      : supabase.from("mv_mot24_models").select("model").limit(2000),
+    supabase.from("mv_mot24_categories").select("failure_category"),
+    supabase.from("mv_mot24_mileage").select("mileage_bucket"),
+    supabase.from("mv_mot24_months").select("month_year")
   ]);
 
   return {
