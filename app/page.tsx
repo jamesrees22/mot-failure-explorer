@@ -1,16 +1,26 @@
 import { supabase } from "@/lib/supabase";
+import { distinctValues } from "@/lib/distinct";
 import FiltersBar, { Filters } from "@/components/Filters";
 import KPIs from "@/components/KPIs";
 import { CategoryBar, TrendLine } from "@/components/Charts";
 
-async function fetchOptions() {
-  const fields: (keyof Filters)[] = ["make", "model", "failure_category", "mileage_bucket", "month_year"];
-  const options: Record<string, string[]> = {};
-  for (const f of fields) {
-    const { data } = await supabase.from("aggregated_failures_2024").select(`${f}`).order(f, { ascending: true });
-    options[f] = Array.from(new Set((data ?? []).map((r: any) => r[f]))).filter(Boolean);
-  }
-  return options as Record<keyof Filters, string[]>;
+async function fetchOptions(filters?: Filters) {
+  // Make is global; Model depends on selected Make.
+  const [makes, models, categories, mileage, months] = await Promise.all([
+    distinctValues("make"),
+    distinctValues("model", filters?.make ? { make: filters.make } : undefined),
+    distinctValues("failure_category"),
+    distinctValues("mileage_bucket"),
+    distinctValues("month_year")
+  ]);
+
+  return {
+    make: makes,
+    model: models,
+    failure_category: categories,
+    mileage_bucket: mileage,
+    month_year: months
+  };
 }
 
 async function fetchData(filters: Filters) {
@@ -19,7 +29,8 @@ async function fetchData(filters: Filters) {
     const v = filters[k];
     if (v) q = q.eq(k, v);
   });
-  const { data } = await q.limit(200000);
+  const { data, error } = await q;
+  if (error) throw error;
 
   const totalFailures = (data ?? []).reduce((a: number, r: any) => a + r.failure_count, 0);
 
@@ -40,7 +51,6 @@ async function fetchData(filters: Filters) {
 }
 
 export default async function Page({ searchParams }: { searchParams: Filters }) {
-  const options = await fetchOptions();
   const filters: Filters = {
     make: searchParams.make,
     model: searchParams.model,
@@ -49,7 +59,11 @@ export default async function Page({ searchParams }: { searchParams: Filters }) 
     month_year: searchParams.month_year
   };
 
-  const { totalFailures, catArr, monthArr, topMake } = await fetchData(filters);
+  const [options, { totalFailures, catArr, monthArr, topMake }] = await Promise.all([
+    fetchOptions(filters),
+    fetchData(filters)
+  ]);
+
   const topCategory = catArr[0]?.name ?? "";
   const period = filters.month_year ?? "2024";
 
@@ -60,7 +74,7 @@ export default async function Page({ searchParams }: { searchParams: Filters }) 
         <div className="text-xs font-mono text-soft">LAST UPDATE: 2024-12-31 23:59 UTC</div>
       </div>
 
-      {/* pass only serializable props */}
+      {/* client component manages URL updates */}
       <FiltersBar options={options} initial={filters} />
 
       <KPIs totalFailures={totalFailures} topCategory={topCategory} topMake={topMake} period={period} />
