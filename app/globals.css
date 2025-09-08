@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+body { @apply bg-bg text-gray-100; }
+
+.card { @apply bg-panel rounded-2xl p-5 shadow-lg shadow-black/30 border border-white/5; }
+.kpi-label { @apply text-sm uppercase tracking-widest text-soft font-mono; }
+.kpi-value { @apply text-3xl font-bold text-white; }

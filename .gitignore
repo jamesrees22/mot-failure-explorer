@@ -1,0 +1,14 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# production
+/.next
+/out
+
+# misc
+.DS_Store
+.env
+.env.*
+!.env.example
