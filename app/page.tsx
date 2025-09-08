@@ -5,21 +5,22 @@ import KPIs from "@/components/KPIs";
 import { CategoryBar, TrendLine } from "@/components/Charts";
 
 async function fetchOptions(filters?: Filters) {
-  // Make is global; Model depends on selected Make.
-  const [makes, models, categories, mileage, months] = await Promise.all([
-    distinctValues("make"),
-    distinctValues("model", filters?.make ? { make: filters.make } : undefined),
-    distinctValues("failure_category"),
-    distinctValues("mileage_bucket"),
-    distinctValues("month_year")
+  const [{ data: makes }, { data: models }, { data: cats }, { data: miles }, { data: months }] = await Promise.all([
+    supabase.from("mv_mot24_makes").select("make").order("failures", { ascending: false }),
+    filters?.make
+      ? supabase.from("mv_mot24_models").select("model").eq("make", filters.make).order("failures", { ascending: false })
+      : supabase.from("mv_mot24_models").select("model").order("failures", { ascending: false }).limit(2000),
+    supabase.from("mv_mot24_categories").select("failure_category").order("failures", { ascending: false }),
+    supabase.from("mv_mot24_mileage").select("mileage_bucket").order("mileage_bucket", { ascending: true }),
+    supabase.from("mv_mot24_months").select("month_year").order("month_year", { ascending: true })
   ]);
 
   return {
-    make: makes,
-    model: models,
-    failure_category: categories,
-    mileage_bucket: mileage,
-    month_year: months
+    make: Array.from(new Set((makes ?? []).map((r: any) => r.make))).filter(Boolean),
+    model: Array.from(new Set((models ?? []).map((r: any) => r.model))).filter(Boolean),
+    failure_category: Array.from(new Set((cats ?? []).map((r: any) => r.failure_category))).filter(Boolean),
+    mileage_bucket: Array.from(new Set((miles ?? []).map((r: any) => r.mileage_bucket))).filter(Boolean),
+    month_year: Array.from(new Set((months ?? []).map((r: any) => r.month_year))).filter(Boolean)
   };
 }
 
