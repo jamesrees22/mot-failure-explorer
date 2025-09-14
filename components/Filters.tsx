@@ -31,10 +31,10 @@ export default function FiltersBar({
   function Select({ label, field }: { label: string; field: keyof Filters }) {
     const opts = options[field] ?? [];
     return (
-      <label className="flex flex-col gap-1">
-        <span className="kpi-label text-red-400">{label}</span>
+      <div className="flex flex-col gap-1">
+        <label className="kpi-label">{label}</label>
         <select
-          className="bg-gray-800 border border-red-900 rounded-xl px-3 py-2 text-white"
+          className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
           value={(filters[field] as string) || ""}
           onChange={(e) =>
             setFilters((f) => ({ ...f, [field]: e.target.value || undefined }))
@@ -45,12 +45,12 @@ export default function FiltersBar({
             <option key={o} value={o}>{o}</option>
           ))}
         </select>
-      </label>
+      </div>
     );
   }
 
   return (
-    <div className="card bg-gray-800 border-red-900 grid grid-cols-2 md:grid-cols-5 gap-4">
+    <div className="card grid grid-cols-1 md:grid-cols-5 gap-4">
       <Select label="Make" field="make" />
       <Select label="Model" field="model" />
       <Select label="Category" field="failure_category" />

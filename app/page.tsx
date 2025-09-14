@@ -91,11 +91,7 @@ export default async function Page({ searchParams }: { searchParams: Filters }) 
   const period = filters.month_year ?? "2024";
 
   return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between text-gray-300">
-        <div className="text-lg font-semibold">TACTICAL COMMAND / <span className="text-red-500">OVERVIEW</span></div>
-        <div className="text-xs">LAST UPDATE: 2024-12-31 23:59 UTC</div>
-      </div>
+    <div className="space-y-6">
       <FiltersBar options={options} initial={filters} />
       <KPIs totalFailures={totalFailures} topCategory={topCategory} topMake={topMake} period={period} />
       <div className="grid md:grid-cols-2 gap-6">
