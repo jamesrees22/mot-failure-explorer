@@ -19,7 +19,6 @@ function uniqPreserve<T>(arr: T[]) {
 
 async function fetchOptions(filters?: Filters) {
   const [{ data: makes }, { data: models }, { data: cats }, { data: miles }, { data: months }] = await Promise.all([
-    // A→Z explicitly
     supabase.from("mv_mot24_makes").select("make").order("make", { ascending: true }),
     filters?.make
       ? supabase
@@ -27,6 +26,7 @@ async function fetchOptions(filters?: Filters) {
           .select("model")
           .eq("make", filters.make)
           .order("model", { ascending: true })
+          .limit(5000)
       : supabase
           .from("mv_mot24_models")
           .select("model")
@@ -91,18 +91,14 @@ export default async function Page({ searchParams }: { searchParams: Filters }) 
   const period = filters.month_year ?? "2024";
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="font-mono text-soft">TACTICAL COMMAND / <span className="text-white">OVERVIEW</span></div>
-        <div className="text-xs font-mono text-soft">LAST UPDATE: 2024-12-31 23:59 UTC</div>
+    <div className="space-y-8">
+      <div className="flex items-center justify-between text-gray-300">
+        <div className="text-lg font-semibold">TACTICAL COMMAND / <span className="text-red-500">OVERVIEW</span></div>
+        <div className="text-xs">LAST UPDATE: 2024-12-31 23:59 UTC</div>
       </div>
-
-      {/* client component manages URL updates */}
       <FiltersBar options={options} initial={filters} />
-
       <KPIs totalFailures={totalFailures} topCategory={topCategory} topMake={topMake} period={period} />
-
-      <div className="grid md:grid-cols-2 gap-4">
+      <div className="grid md:grid-cols-2 gap-6">
         <CategoryBar data={catArr.slice(0, 12)} />
         <TrendLine data={monthArr} />
       </div>

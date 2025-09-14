@@ -9,7 +9,10 @@ export async function distinctValues(
   const values = new Set<string>();
   let from = 0;
   while (true) {
-    let q = supabase.from("aggregated_failures_2024").select(column, { count: "exact" }).range(from, from + PAGE - 1);
+    let q = supabase
+      .from("aggregated_failures_2024")
+      .select(column, { count: "exact" })
+      .range(from, from + PAGE - 1);
     if (where) {
       Object.entries(where).forEach(([k, v]) => {
         if (v) q = q.eq(k, v);

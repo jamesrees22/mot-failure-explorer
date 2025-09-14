@@ -20,7 +20,6 @@ export default function FiltersBar({
   const router = useRouter();
   const [filters, setFilters] = useState<Filters>(initial ?? {});
 
-  // whenever filters change, push to URL (no scroll)
   useEffect(() => {
     const params = new URLSearchParams();
     (Object.entries(filters) as [keyof Filters, string | undefined][])
@@ -33,9 +32,9 @@ export default function FiltersBar({
     const opts = options[field] ?? [];
     return (
       <label className="flex flex-col gap-1">
-        <span className="kpi-label">{label}</span>
+        <span className="kpi-label text-red-400">{label}</span>
         <select
-          className="bg-bg border border-white/10 rounded-xl px-3 py-2"
+          className="bg-gray-800 border border-red-900 rounded-xl px-3 py-2 text-white"
           value={(filters[field] as string) || ""}
           onChange={(e) =>
             setFilters((f) => ({ ...f, [field]: e.target.value || undefined }))
@@ -51,7 +50,7 @@ export default function FiltersBar({
   }
 
   return (
-    <div className="card grid grid-cols-2 md:grid-cols-5 gap-4">
+    <div className="card bg-gray-800 border-red-900 grid grid-cols-2 md:grid-cols-5 gap-4">
       <Select label="Make" field="make" />
       <Select label="Model" field="model" />
       <Select label="Category" field="failure_category" />
